@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Runtime artifacts
+reports/*.pdf
+reports/*.json
+reports/*.csv
+reports/figures/*.png
+
+# Data snapshots
+# Keep directory placeholders committed.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/external/*
+!data/external/.gitkeep
