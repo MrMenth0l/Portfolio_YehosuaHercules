@@ -5,6 +5,7 @@ scipy
 scikit-learn
 statsmodels
 pyarrow
+joblib
 pytest
 ruff
 black
