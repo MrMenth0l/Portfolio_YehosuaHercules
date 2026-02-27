@@ -6,95 +6,33 @@ import src.io as io
 import src.pipeline as pipeline
 
 
-def _sample_raw_df() -> pd.DataFrame:
-    df = pd.DataFrame(
-        {
-            "date": ["2026-01-01", "2026-01-02", "2026-01-03"],
-            "rate": [7.6, 7.7, 7.8],
-        }
-    )
-    df["date"] = pd.to_datetime(df["date"])
+def _sample_raw_df(rows: int = 700) -> pd.DataFrame:
+    dates = pd.date_range("2024-01-01", periods=rows, freq="D")
+    rates = [7.2 + idx * 0.0005 for idx in range(rows)]
+    df = pd.DataFrame({"date": dates, "rate": rates})
     df.attrs["requested_start_date"] = "1900-01-01"
     df.attrs["requested_end_date"] = "2026-02-22"
     return df
 
 
-def _sample_feature_df() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
-            "rate": [7.6, 7.7],
-            "return_simple": [0.001, 0.0012],
-            "return_log": [0.00099, 0.00119],
-            "pnl": [10.0, 12.0],
-            "pnl_next_day": [12.0, 11.0],
-            "is_weekend": [0, 0],
-        }
-    )
-
-
-def test_pipeline_always_refresh_calls_download_every_run(
-    monkeypatch,
-    tmp_path: Path,
-    capsys,
-) -> None:
-    calls = {"download": 0}
-
-    def fake_download() -> pd.DataFrame:
-        calls["download"] += 1
-        return _sample_raw_df()
-
-    raw_path = tmp_path / "usd_gtq_daily.csv"
-    feature_path = tmp_path / "features.parquet"
-
-    monkeypatch.setattr(
-        io,
-        "RAW_METADATA_FILE",
-        tmp_path / "usd_gtq_daily.metadata.json",
-    )
-    monkeypatch.setattr(pipeline, "ensure_directories", lambda: None)
-    monkeypatch.setattr(pipeline, "download_data", fake_download)
-    monkeypatch.setattr(
-        pipeline,
-        "save_raw_snapshot",
-        lambda df: io.save_raw_snapshot(df, raw_path),
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "load_raw",
-        lambda path=None: io.load_raw(raw_path if path is None else path),
-    )
-    monkeypatch.setattr(pipeline, "clean", lambda df: df)
-    monkeypatch.setattr(pipeline, "build_features", lambda df: _sample_feature_df())
-    monkeypatch.setattr(
-        pipeline,
-        "save_feature_frame",
-        lambda df: io.save_feature_frame(df, feature_path),
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "load_feature_frame",
-        lambda path=None: io.load_feature_frame(feature_path if path is None else path),
-    )
-
-    pipeline.run()
-    pipeline.run()
-
-    assert calls["download"] == 2
-    assert "STAGE3_FEATURES" in capsys.readouterr().out
-
-
-def test_pipeline_stage3_creates_features_parquet(
-    monkeypatch,
-    tmp_path: Path,
-    capsys,
-) -> None:
+def _patch_stage4_paths(monkeypatch, tmp_path: Path) -> tuple[Path, Path, Path]:
     raw_path = tmp_path / "usd_gtq_daily.csv"
     metadata_path = tmp_path / "usd_gtq_daily.metadata.json"
-    feature_path = tmp_path / "features.parquet"
+    predictions_path = tmp_path / "reports" / "fx-var_usdgtq_predictions.csv"
+    model_dir = tmp_path / "models"
 
     monkeypatch.setattr(io, "RAW_METADATA_FILE", metadata_path)
-    monkeypatch.setattr(pipeline, "ensure_directories", lambda: None)
+    monkeypatch.setattr(pipeline, "MODEL_DIR", model_dir)
+    monkeypatch.setattr(pipeline, "PREDICTIONS_FILE", predictions_path)
+    return raw_path, metadata_path, predictions_path
+
+
+def test_pipeline_stage4_writes_predictions_csv_with_required_columns(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    raw_path, _, predictions_path = _patch_stage4_paths(monkeypatch, tmp_path)
+
     monkeypatch.setattr(pipeline, "download_data", _sample_raw_df)
     monkeypatch.setattr(
         pipeline,
@@ -106,23 +44,66 @@ def test_pipeline_stage3_creates_features_parquet(
         "load_raw",
         lambda path=None: io.load_raw(raw_path if path is None else path),
     )
-    monkeypatch.setattr(pipeline, "clean", lambda df: df)
-    monkeypatch.setattr(pipeline, "build_features", lambda df: _sample_feature_df())
+
+    pipeline.run()
+
+    output = pd.read_csv(predictions_path)
+    assert list(output.columns) == [
+        "date",
+        "pnl_next_day",
+        "pred_qr_linear",
+        "pred_qr_tree",
+        "pred_linear_mean",
+    ]
+    assert len(output) == 250
+    assert not output.isna().any().any()
+
+
+def test_pipeline_stage4_saves_all_model_files(monkeypatch, tmp_path: Path) -> None:
+    raw_path, _, _ = _patch_stage4_paths(monkeypatch, tmp_path)
+    model_dir = tmp_path / "models"
+
+    monkeypatch.setattr(pipeline, "download_data", _sample_raw_df)
     monkeypatch.setattr(
         pipeline,
-        "save_feature_frame",
-        lambda df: io.save_feature_frame(df, feature_path),
+        "save_raw_snapshot",
+        lambda df: io.save_raw_snapshot(df, raw_path),
     )
     monkeypatch.setattr(
         pipeline,
-        "load_feature_frame",
-        lambda path=None: io.load_feature_frame(feature_path if path is None else path),
+        "load_raw",
+        lambda path=None: io.load_raw(raw_path if path is None else path),
     )
 
     pipeline.run()
 
-    output = capsys.readouterr().out
-    assert "STAGE3_FEATURES" in output
-    assert raw_path.exists()
-    assert metadata_path.exists()
-    assert feature_path.exists()
+    assert (model_dir / "qr_linear_q01.joblib").exists()
+    assert (model_dir / "qr_tree_q01.joblib").exists()
+    assert (model_dir / "linear_mean.joblib").exists()
+
+
+def test_pipeline_stage4_uses_fixed_250_day_test_window(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    raw_path, _, predictions_path = _patch_stage4_paths(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(pipeline, "download_data", _sample_raw_df)
+    monkeypatch.setattr(
+        pipeline,
+        "save_raw_snapshot",
+        lambda df: io.save_raw_snapshot(df, raw_path),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_raw",
+        lambda path=None: io.load_raw(raw_path if path is None else path),
+    )
+
+    pipeline.run()
+
+    output = pd.read_csv(predictions_path)
+    stdout = capsys.readouterr().out
+    assert len(output) == 250
+    assert "STAGE4_MODELS" in stdout

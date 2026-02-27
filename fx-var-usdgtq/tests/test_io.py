@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -131,6 +132,88 @@ def test_download_data_chunks_and_combines_ranges(
         "2026-01-02",
     ]
     assert df["rate"].tolist() == [7.7, 7.8, 7.9]
+
+
+def test_timeout_retry_succeeds_after_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _soap_response_xml([("01/01/2026", "7.66451", "7.60000")])
+    attempts = {"count": 0}
+    sleeps: list[int] = []
+
+    def fake_urlopen(_: urllib.request.Request, timeout: int) -> _FakeResponse:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise urllib.error.URLError("temporary failure")
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(io.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(io, "SOAP_MAX_RETRIES", 5)
+    monkeypatch.setattr(io, "SOAP_BACKOFF_BASE_SECONDS", 1)
+    monkeypatch.setattr(io, "SOAP_BACKOFF_MAX_SECONDS", 4)
+    monkeypatch.setattr(io.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    df = io.download_data("2026-01-01", "2026-01-01")
+
+    assert attempts["count"] == 3
+    assert sleeps == [1, 2]
+    assert len(df) == 1
+
+
+def test_timeout_retry_exhaustion_raises_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(_: urllib.request.Request, timeout: int) -> _FakeResponse:
+        raise urllib.error.URLError("persistent failure")
+
+    monkeypatch.setattr(io.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(io, "SOAP_MAX_RETRIES", 3)
+    monkeypatch.setattr(io, "SOAP_BACKOFF_BASE_SECONDS", 1)
+    monkeypatch.setattr(io, "SOAP_BACKOFF_MAX_SECONDS", 2)
+    monkeypatch.setattr(io.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        io.download_data("2026-01-01", "2026-01-01")
+
+    message = str(exc_info.value)
+    assert "attempts=3" in message
+    assert "2026-01-01" in message
+    assert io.BANGUAT_WSDL_ENDPOINT in message
+
+
+def test_timeout_retry_counter_is_chunk_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload_by_date = {
+        "31/12/2025": _soap_response_xml([("31/12/2025", "7.70000", "7.60000")]),
+        "01/01/2026": _soap_response_xml([("01/01/2026", "7.80000", "7.60000")]),
+    }
+    failed_once: dict[str, bool] = {}
+    calls = {"count": 0}
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int) -> _FakeResponse:
+        calls["count"] += 1
+        body = request.data.decode("utf-8")
+        start_tag = "<fechainit>"
+        end_tag = "</fechainit>"
+        start_date = body.split(start_tag)[1].split(end_tag)[0]
+
+        if start_date not in failed_once:
+            failed_once[start_date] = True
+            raise urllib.error.URLError(f"transient failure for {start_date}")
+        return _FakeResponse(payload_by_date[start_date])
+
+    monkeypatch.setattr(io.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(io, "SOAP_MAX_RETRIES", 2)
+    monkeypatch.setattr(io, "SOAP_BACKOFF_BASE_SECONDS", 1)
+    monkeypatch.setattr(io, "SOAP_BACKOFF_MAX_SECONDS", 2)
+    monkeypatch.setattr(io.time, "sleep", lambda _: None)
+
+    df = io.download_data("2025-12-31", "2026-01-01")
+
+    assert len(df) == 2
+    assert calls["count"] == 4
+    assert sorted(failed_once.keys()) == ["01/01/2026", "31/12/2025"]
 
 
 def test_download_data_soap_fault_raises_actionable_error(
