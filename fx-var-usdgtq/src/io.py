@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -20,6 +21,9 @@ from src.config import (
     DEFAULT_PROCESSED_FILE,
     DEFAULT_RAW_FILE,
     RAW_METADATA_FILE,
+    SOAP_BACKOFF_BASE_SECONDS,
+    SOAP_BACKOFF_MAX_SECONDS,
+    SOAP_MAX_RETRIES,
     SOAP_TIMEOUT_SECONDS,
 )
 
@@ -79,19 +83,32 @@ def _post_soap_request(start: date, end: date) -> bytes:
         },
     )
 
-    try:
-        with urllib.request.urlopen(request, timeout=SOAP_TIMEOUT_SECONDS) as response:
-            return response.read()
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(
-            "HTTP error while querying Banguat SOAP endpoint "
-            f"{BANGUAT_WSDL_ENDPOINT} for range {start} to {end}: HTTP {exc.code}."
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            "Network error while querying Banguat SOAP endpoint "
-            f"{BANGUAT_WSDL_ENDPOINT} for range {start} to {end}: {exc.reason}."
-        ) from exc
+    last_error: Exception | None = None
+    for attempt in range(1, SOAP_MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=SOAP_TIMEOUT_SECONDS,
+            ) as response:
+                return response.read()
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt >= SOAP_MAX_RETRIES:
+                raise RuntimeError(
+                    "Banguat SOAP request failed after max retries. "
+                    f"endpoint={BANGUAT_WSDL_ENDPOINT} range={start}:{end} "
+                    f"attempts={SOAP_MAX_RETRIES} error={exc}"
+                ) from exc
+
+            delay_seconds = min(
+                SOAP_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                SOAP_BACKOFF_MAX_SECONDS,
+            )
+            time.sleep(delay_seconds)
+
+    raise RuntimeError(
+        "Banguat SOAP request failed unexpectedly without a captured exception."
+    ) from last_error
 
 
 def _extract_rows_from_payload(
