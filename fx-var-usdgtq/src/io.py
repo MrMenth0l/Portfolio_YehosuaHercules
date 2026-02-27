@@ -16,6 +16,7 @@ from src.config import (
     BANGUAT_WSDL_ENDPOINT,
     DEFAULT_DOWNLOAD_END_DATE,
     DEFAULT_DOWNLOAD_START_DATE,
+    DEFAULT_FEATURES_FILE,
     DEFAULT_PROCESSED_FILE,
     DEFAULT_RAW_FILE,
     RAW_METADATA_FILE,
@@ -23,6 +24,7 @@ from src.config import (
 )
 
 REQUIRED_COLUMNS = ["date", "rate"]
+FEATURE_REQUIRED_COLUMNS = ["date", "pnl_next_day"]
 SOAP_ACTION = "http://www.banguat.gob.gt/variables/ws/TipoCambioRango"
 SOAP_NAMESPACE = "http://www.banguat.gob.gt/variables/ws/"
 SOAP_ENVELOPE_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/"
@@ -287,3 +289,56 @@ def load_processed(path: Path | None = None) -> pd.DataFrame:
     df = pd.read_parquet(processed_path)
     _validate_strict_schema(df)
     return _coerce_strict_types(df)
+
+
+def _coerce_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [col for col in FEATURE_REQUIRED_COLUMNS if col not in df.columns]
+    if missing:
+        missing_display = ", ".join(missing)
+        raise ValueError(
+            "Feature frame schema mismatch. Missing required columns: "
+            f"{missing_display}."
+        )
+
+    converted = df.copy()
+    try:
+        converted["date"] = pd.to_datetime(converted["date"], errors="raise")
+        converted["pnl_next_day"] = pd.to_numeric(
+            converted["pnl_next_day"],
+            errors="raise",
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Feature frame has invalid dtypes. 'date' must be datetime-like and "
+            "'pnl_next_day' numeric."
+        ) from exc
+
+    converted = converted.sort_values("date").reset_index(drop=True)
+    if converted.isna().any().any():
+        raise ValueError("Feature frame contains NaNs.")
+    if converted["date"].duplicated().any():
+        raise ValueError("Feature frame must contain unique dates.")
+    return converted
+
+
+def save_feature_frame(df: pd.DataFrame, path: Path | None = None) -> Path:
+    """Persist Stage-3 feature frame as Parquet."""
+    out_path = path if path is not None else DEFAULT_FEATURES_FILE
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    normalized = _coerce_feature_frame(df)
+    normalized.to_parquet(out_path, index=False)
+    return out_path
+
+
+def load_feature_frame(path: Path | None = None) -> pd.DataFrame:
+    """Load Stage-3 feature frame from Parquet."""
+    feature_path = path if path is not None else DEFAULT_FEATURES_FILE
+    if not feature_path.exists():
+        raise FileNotFoundError(
+            "Feature frame file not found at "
+            f"{feature_path}. Expected a Stage-3 features parquet file."
+        )
+
+    df = pd.read_parquet(feature_path)
+    return _coerce_feature_frame(df)

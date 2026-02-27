@@ -14,10 +14,14 @@ BANGUAT_WSDL_ENDPOINT = "https://banguat.gob.gt/variables/ws/TipoCambio.asmx"
 DEFAULT_DOWNLOAD_START_DATE = "1900-01-01"
 DEFAULT_DOWNLOAD_END_DATE = "2026-02-22"
 SOAP_TIMEOUT_SECONDS = 30
+DEFAULT_NOTIONAL_USD = 10000.0
+FEATURE_LAGS = (1, 5, 10, 20, 60)
+DEFAULT_TEST_DAYS = 250
 
 DEFAULT_RAW_FILE = RAW_DIR / "usd_gtq_daily.csv"
 RAW_METADATA_FILE = RAW_DIR / "usd_gtq_daily.metadata.json"
 DEFAULT_PROCESSED_FILE = PROCESSED_DIR / "fx_rates.parquet"
+DEFAULT_FEATURES_FILE = PROCESSED_DIR / "features.parquet"
 
 
 def ensure_directories() -> None:
